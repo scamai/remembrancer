@@ -1,0 +1,8 @@
+# Ingest, distill, lint, index and the query CLI need only the standard library.
+
+PyYAML>=6.0          # registry/entities.yml: without it the registry reads as empty, with no warning
+mcp>=1.30,<2         # the MCP server (mcp/server.py), stdio and streamable HTTP
+uvicorn>=0.30        # serves the streamable-HTTP transport
+starlette>=0.37      # per-request identity middleware for that transport
+cryptography>=41.0   # Ed25519 signatures on human approvals
+anthropic>=0.40      # only for the optional LLM distiller: any Anthropic-compatible endpoint

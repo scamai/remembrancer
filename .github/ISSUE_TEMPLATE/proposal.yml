@@ -1,0 +1,25 @@
+name: Proposal
+description: Agree on the shape of a larger change, such as a new connector, MCP tool or storage change, before you write it.
+labels: [proposal]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What a team cannot do today, and who needs it.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: The change
+      description: What it adds or changes, and which layers it touches. The layers are ingest, distill, lint, retrieve and the MCP server.
+    validations:
+      required: true
+  - type: textarea
+    id: access
+    attributes:
+      label: Who may read what it produces
+      description: The access labels its events and notes carry, and where they come from.
+    validations:
+      required: true

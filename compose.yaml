@@ -1,0 +1,61 @@
+# Remembrancer in Docker. Create your config first, next to this file:
+#
+#   cp config.example.json config.json
+#   docker compose run --rm remembrancer demo
+#
+# The memory lives in four named volumes, mounted where the code reads them.
+# To ingest your own repository, mount it and pass its path:
+#
+#   docker compose run --rm -v "$PWD/../my-repo:/repos/my-repo:ro" remembrancer ingest /repos/my-repo
+#
+# For a team, the http profile serves MCP over streamable HTTP on this host's
+# loopback, behind your own reverse proxy, which signs callers in. Put
+# REMEMBRANCER_MCP_PROXY_SECRET=<32+ random characters> in .env next to this
+# file, then:
+#
+#   docker compose --profile http up -d
+#
+# The proxy must, on every request:
+#   - send X-Remembrancer-Proxy-Secret with that value, or the request gets 403;
+#   - set Tailscale-User-Login to the signed-in caller, a key of config.json
+#     "identities", replacing any value the caller sent;
+#   - send Host 127.0.0.1:8790 or localhost:8790, as nginx's proxy_pass does,
+#     or a host listed in config.json "mcp": {"http": {"allowed_hosts": [...]}};
+#     any other Host gets 421;
+#   - drop the caller's Authorization header: v0.1 has no token sign-in, so a
+#     request that carries one gets 401.
+
+x-remembrancer: &remembrancer
+  build: .
+  image: remembrancer:local
+  volumes:
+    - type: bind
+      source: ./config.json
+      target: /app/config.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - events:/app/events
+    - context:/app/context
+    - state:/app/state
+    - registry:/app/registry
+
+services:
+  remembrancer:
+    <<: *remembrancer
+
+  http:
+    <<: *remembrancer
+    profiles: ["http"]
+    command: ["mcp-http"]
+    environment:
+      REMEMBRANCER_MCP_PROXY_SECRET: ${REMEMBRANCER_MCP_PROXY_SECRET:-}
+    ports:
+      - "127.0.0.1:8790:8790"
+    restart: unless-stopped
+
+volumes:
+  events:
+  context:
+  state:
+  registry:

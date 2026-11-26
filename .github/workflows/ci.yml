@@ -1,0 +1,81 @@
+# Every push to main and every pull request runs the tests, the README's
+# Docker demo and, on a pull request, the DCO check that CONTRIBUTING.md
+# describes. Each job's steps are plain commands, so you can run them locally.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests, Python 3.12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Test
+        run: python -m pytest -q
+
+  demo:
+    name: Docker demo
+    runs-on: ubuntu-latest
+    env:
+      # A project of its own, so a run on your machine never touches the
+      # volumes of a real deployment.
+      COMPOSE_PROJECT_NAME: remembrancer-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image and run the README's Docker demo
+        run: |
+          cp -n config.example.json config.json
+          docker compose build
+          docker compose run --rm -T remembrancer demo | tee demo.out
+          docker compose down -v
+          # The demo question's answer, ranked first, as the README shows it.
+          grep -E 'DELIVER +\[ *1\] docs-sam-rivera-becomes ' demo.out
+
+  dco:
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Every commit is signed off by its author
+        run: |
+          # On a pull request GitHub checks out a merge commit: its first parent
+          # is the base branch, its second the pull request's head. Anywhere
+          # else, check the commits that origin/main does not have, or every
+          # commit in a repository that has no origin/main yet.
+          if [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
+            range='HEAD^1..HEAD^2'
+          elif git rev-parse -q --verify origin/main >/dev/null; then
+            range='origin/main..HEAD'
+          else
+            range='HEAD'
+          fi
+          # A range git cannot read fails the check: it must not pass having
+          # read no commit.
+          if ! commits=$(git rev-list --no-merges "$range"); then
+            echo "::error::cannot list the commits in $range"
+            exit 1
+          fi
+          status=0
+          for commit in $commits; do
+            author=$(git log -1 --format='%an <%ae>' "$commit")
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$commit" | grep -qxF "$author"; then
+              echo "::error::$(git log -1 --format='%h %s' "$commit"): no 'Signed-off-by: $author' line. CONTRIBUTING.md says how to add it."
+              status=1
+            fi
+          done
+          exit $status

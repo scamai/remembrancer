@@ -1,0 +1,23 @@
+{
+  "mcp": {
+    "organization": "Acme",
+    "tools": [
+      "remembrancer_search",
+      "remembrancer_get_note",
+      "remembrancer_dig",
+      "remembrancer_confirm_answer",
+      "remembrancer_timeline",
+      "remembrancer_recent_git_activity",
+      "remembrancer_remember",
+      "remembrancer_whoami"
+    ]
+  },
+  "identity": {"trust_caller_claims": false},
+  "identities": {
+    "dana": ["eng"],
+    "guest": []
+  },
+  "acl_defaults": {"git": ["eng"]},
+  "governance": {"internal_domains": ["acme.example"]},
+  "trust": {"hide_verification_failures": false}
+}

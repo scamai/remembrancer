@@ -1,0 +1,21 @@
+# requirements.txt lists the dependencies; this file holds the test settings.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remembrancer"
+version = "0.1.0a0"
+description = "Event-sourced memory for a team: ingest git history, distill it into notes, and serve them over MCP with per-identity access control."
+requires-python = ">=3.12"
+
+[tool.setuptools]
+# `mcp/` is left out on purpose: its name collides with the `mcp` SDK the
+# server imports, and an editable install would shadow the SDK.
+packages = ["remembrancerlib", "ingest", "distill", "retrieve", "integrations", "lint"]
+
+[tool.pytest.ini_options]
+# Puts the tree's root on sys.path, so tests import remembrancerlib and friends.
+pythonpath = ["."]
+testpaths = ["tests"]

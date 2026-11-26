@@ -1,0 +1,20 @@
+# Your memory. v0.1 keeps it in the tree, next to the code, so keep it out of
+# your commits: the events, the notes, the pipeline's state, your config and
+# your registry.
+/config.json
+/events/
+/context/
+/state/
+/registry/
+
+# The http profile's proxy secret: docker compose reads it from .env.
+/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# The demo repository examples/demo-repo.sh builds by default
+/demo-repo/

@@ -1,0 +1,51 @@
+name: Bug report
+description: Remembrancer does something its README or AGENTS.md says it should not.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem goes to SECURITY.md, never to a public issue.
+        Paste no real memory: no events, notes, names or addresses from your deployment. The demo repository, `examples/demo-repo.sh`, is a safe base for a reproduction.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0a0, or a commit on main
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: How you run it
+      options:
+        - A Python virtualenv
+        - Docker
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, from a fresh clone if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output and any error, trimmed to the part that matters.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and the MCP client if one is involved.

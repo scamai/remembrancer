@@ -1,0 +1,12 @@
+# Never bake a deployment's memory, or a local environment, into the image.
+config.json
+.env
+events/
+context/
+state/
+registry/
+demo-repo/
+.venv/
+.git/
+**/__pycache__/
+**/*.pyc
