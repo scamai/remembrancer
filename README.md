@@ -1,68 +1,72 @@
 # Remembrancer
 
-Memory for a team's AI agents. Remembrancer reads your git history, distills it into notes that cite the commits behind them, and serves those notes to agents over [MCP](https://modelcontextprotocol.io). Each caller reads only the notes their access allows.
-
-It is for a team that wants its agents to answer "who is on call for this service?", "what did we decide about the webhook API?" or "what changed last week?" from the team's own record, on the team's own machines. It needs no account and no LLM: distillation is deterministic, and an LLM endpoint is optional. It reaches the network only when you configure it to. It mirrors a repository that `config.json` names by URL, or as `owner/name` with no local clone, and each repository of an organisation named in `git_org`. With an LLM key set, it sends the commits it distills to that endpoint.
+Give your team's AI agents a searchable record of what changed and why. Remembrancer turns Git commits into local notes with source citations and serves them over [MCP](https://modelcontextprotocol.io). Each agent sees the notes its identity can read.
 
 > [!NOTE]
-> **Alpha: v0.1.0a0.** Tested on Linux with Python 3.12, and in Docker. v0.1 ingests git only, keeps its memory as plain files next to the code, and has no command yet to approve the notes it holds for a human. [Limits](#limits-of-v01) lists the rest. Commands, files and settings may change before 1.0.
+> [**v0.1.0-alpha**](https://github.com/scamai/remembrancer/releases/tag/v0.1.0-alpha) ingests Git and stores memory as local files. The quick start and Docker path are tested on Linux with Python 3.12. [See alpha limits](#limits-of-v01).
 
-[Quick start](#quick-start) · [What just happened](#what-just-happened) · [Your own repositories](#your-own-repositories) · [Connect an agent](#connect-an-agent) · [Who sees what](#who-sees-what) · [Serve a team over HTTP](#serve-a-team-over-http) · [How it works](#how-it-works) · [Limits](#limits-of-v01) · [Contributing](#contributing)
+[Try the demo](#quick-start) · [Use Docker](#docker-demo) · [Index your Git repositories](#your-own-repositories) · [Connect an agent](#connect-an-agent) · [Get help](#get-help)
 
 ## Quick start
 
-You need Python 3.12 or newer, git and bash.
+The demo creates ten fictional commits for Acme. Ask who is on call for `ledger-service` and the CLI returns the answer with its source commit. This excerpt is from a real demo run.
+
+<!-- first-run:output -->
+```text
+docs: Sam Rivera becomes on-call owner for ledger-service
+acl:['eng']
+provenance:['git:747d6c350a51c9942b3d807f9af8ae5c8681461d']
+[context/eng/docs-sam-rivera-becomes.md]
+```
+
+### Run the demo with Python
+
+You need Git, Bash and Python 3.12 or newer. The demo uses the Python standard library. Once cloned, you can run it offline, without installing packages or model weights.
 
 <!-- first-run:install -->
 ```sh
 git clone https://github.com/scamai/remembrancer
 cd remembrancer
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
 ```
 
-Build a small fictional repository, ten commits by one team at "Acme", then index it and ask it a question as `dana`, an engineer:
+In that fresh checkout, build the fixture, index it and run a query as `dana`, an engineer.
 
 <!-- first-run:run -->
 ```sh
 examples/demo-repo.sh
-cp config.example.json config.json
-python scripts/run.py --ingest-git demo-repo --lint
-python retrieve/query.py --as dana --q "who is on call for ledger-service"
+test -e config.json || cp config.example.json config.json
+REMEMBRANCER_LLM_API_KEY= python3 scripts/run.py --ingest-git demo-repo --lint
+python3 retrieve/query.py --as dana --q "who is on call for ledger-service"
 ```
 
-The run takes about a second. The answer ranks first, with the commit it came from (output abridged; your date differs):
-
-<!-- first-run:output -->
-```text
-identity=dana grants=['eng'] · q='who is on call for ledger-service' · 7 candidates (pool, recall-wide)
-
-★ DELIVER  [ 1] docs-sam-rivera-becomes  (bm25=4.0462) · fresh (as of 2026-11-11, updated)
-            acl:['eng']
-            provenance:['git:747d6c350a51c9942b3d807f9af8ae5c8681461d']
-            docs: Sam Rivera becomes on-call owner for ledger-service
-            [context/eng/docs-sam-rivera-becomes.md]
-```
-
-`guest` holds no access label, so the same question finds nothing:
+The on-call note ranks first. Open `context/eng/docs-sam-rivera-becomes.md` to see the note and its citations. Ask the same question as `guest`, who has no access labels.
 
 <!-- first-run:guest -->
 ```sh
-python retrieve/query.py --as guest --q "who is on call for ledger-service"
+python3 retrieve/query.py --as guest --q "who is on call for ledger-service"
 ```
 
 <!-- first-run:guest-output -->
 ```text
-identity=guest grants=DENY (public-only) · q='who is on call for ledger-service' · 0 candidates (pool, recall-wide)
 (no matches)
 ```
 
-**With Docker instead**, from the repository folder: `cp config.example.json config.json`, then `docker compose run --rm remembrancer demo`. It builds the image and runs the same steps, and the memory stays in named volumes. `docker compose run --rm remembrancer help` lists the image's other commands.
+[Connect an agent](#connect-an-agent) when you want this memory in your MCP client. That step installs the server dependencies into a virtual environment.
+
+### Docker demo
+
+If you already have Docker with Compose v2, run this instead of the Python demo from a fresh checkout. Compose builds the image and keeps the sample memory in its named volumes.
+
+```sh
+test -e config.json || cp config.example.json config.json
+docker compose run --build --rm remembrancer demo
+```
+
+Look for the same on-call note. To see the available container commands, run `docker compose run --rm remembrancer help`.
 
 ## What just happened
 
-Each layer wrote plain files you can open:
+The [demo script](examples/demo-repo.sh) supplies the input. The pipeline writes plain files you can inspect:
 
 1. **Ingest.** Each commit became an event: one JSON line in `events/<day>.jsonl` with its author, date, files and access labels. Git events take their labels from `acl_defaults.git` in `config.json`, `eng` here.
 2. **Distill.** Events became typed notes in `context/eng/`: markdown whose frontmatter names its sources. Without an LLM, distill groups each repository's commits by day, one note per day; every demo commit falls on its own day, so each became its own note. The commit message sets the type: `decision:` and `policy:` make decision notes, `eval:` a state note. `context/INDEX.md` lists every note on one line.
@@ -92,20 +96,34 @@ OWNERS.md
 
 ## Your own repositories
 
+Use a separate checkout to keep your memory apart from the demo. Start with [config.example.json](config.example.json), set `identities` and `acl_defaults.git`, then index local Git repositories. Use Bash or another POSIX shell.
+
 ```sh
-python scripts/run.py --ingest-git ~/code/billing ~/code/web --lint
+test -e config.json || cp config.example.json config.json
+python3 scripts/run.py --ingest-git ~/code/billing ~/code/web --lint
 ```
 
 - The first run reads each repository's whole history. Later runs add only new commits, so run the same command on a schedule, from cron or a systemd timer, to keep the memory current.
 - A repository you add later is distilled in full, including commits older than the notes already there.
-- To list repositories in `config.json` instead, use the `repos` and `monorepos` keys ([AGENTS.md](AGENTS.md)), then run `python scripts/run.py --ingest-git --lint` with no path.
+- To list repositories in `config.json`, use the `repos` and `monorepos` keys ([AGENTS.md](AGENTS.md)), then run `python3 scripts/run.py --ingest-git --lint` with no path.
 - Give each person an identity in `identities`, with the labels they may read. [Who sees what](#who-sees-what) explains the rules.
+
+The pipeline runs on your machine. It reaches the network only when you configure it to. It mirrors repositories specified by URL, by `owner/name` without a local checkout, or through `git_org`. With an LLM key set, distillation sends the commits it processes to the configured endpoint.
 
 ## Connect an agent
 
+For a local MCP client, install the server's Python dependencies once. This step downloads Python packages. Use the repository where you ran the demo or indexed your own Git repositories.
+
+<!-- mcp:install -->
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
 The MCP server speaks stdio by default, and your agent's client starts it. Started by hand, it prints nothing and waits for a client on standard input. It reads as the identity you set in `REMEMBRANCER_IDENTITY`, and a caller cannot claim another: `identity.trust_caller_claims` is `false` in the example config.
 
-For Claude Code, from the repository folder:
+For Claude Code, from the repository folder, register the server using the virtual environment you just created.
 
 ```sh
 claude mcp add remembrancer -e REMEMBRANCER_IDENTITY=dana -- \
@@ -130,7 +148,7 @@ Clients that take a JSON file, such as Claude Desktop and Cursor, use this shape
 <details>
 <summary>With Docker</summary>
 
-The client runs `docker` instead, and the identity goes into the container with `-e`:
+Use the same checkout and Compose project that hold the indexed memory. The client runs `docker` and passes the identity into the container with `-e`.
 
 <!-- mcp:docker -->
 ```json
@@ -146,6 +164,8 @@ The client runs `docker` instead, and the identity goes into the container with 
 ```
 
 </details>
+
+After connecting, ask your agent to call `remembrancer_whoami`. The demo client should report `dana`. Then ask it to use Remembrancer to find who is on call for `ledger-service`, with a commit citation. For your own repositories, set the client identity to a key in your `config.json`.
 
 The server offers the tools that `mcp.tools` in `config.json` lists. The example config lists all eight:
 
@@ -222,11 +242,17 @@ flowchart TD
 - **Tested scale:** flask's whole history, 3,834 commits once merges are skipped, became 1,588 notes in one run of 146 s with 100 MB peak memory, on a 16-core AMD Ryzen 9 7950X shared with other work. A query then took 0.3 s. Measured 2026-11-11 at flask `49943b5a`.
 - **Memory is plain files** in `events/`, `context/`, `state/` and `registry/`, next to the code, and one pipeline runs at a time. v0.2 moves storage to a database: SQLite by default, Postgres for a team.
 
+## Get help
+
+- **The demo returns no matches for `dana`.** Run from the repository root. Check that `config.json` exists, that `dana` has `eng`, and that `context/INDEX.md` was created. The sample config allows proposed notes to appear in queries.
+- **`demo-repo` already exists.** If the fixture finished, reuse it and run the remaining commands. Ingest skips commits it has already seen. If fixture creation stopped partway through, start in a fresh checkout.
+- **The client cannot start the MCP server.** Check the absolute paths to `.venv/bin/python` and `mcp/server.py` and install the dependencies in that same environment. Then reconnect and call `remembrancer_whoami`.
+
+Ask setup questions in [GitHub issues](https://github.com/scamai/remembrancer/issues). Use the [issue forms](https://github.com/scamai/remembrancer/issues/new/choose) for a reproducible bug or a feature proposal. Report vulnerabilities through [GitHub private reporting](https://github.com/scamai/remembrancer/security/advisories/new). [SECURITY.md](SECURITY.md) describes the information to include.
+
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) says what a pull request needs: tests with every change, one change per pull request, and a DCO sign-off (`git commit -s`) on each commit. Run the tests with `pip install pytest`, then `python -m pytest -q`.
-
-Ask questions and report bugs in [GitHub issues](https://github.com/scamai/remembrancer/issues). Report a security problem privately, as [SECURITY.md](SECURITY.md) describes, never in a public issue.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers local tests, pull requests and the DCO sign-off. If a first-run step is unclear, reproduce it with the fictional demo and submit the precise command or wording fix. Include the output you used to check it.
 
 ## Licence
 
