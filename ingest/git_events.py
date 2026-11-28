@@ -20,6 +20,27 @@ mirror fails with "could not read Username" while `gh api orgs/<org>/repos` work
 An explicit `path` (local worktree) still wins; `url` overrides the
 GitHub-derived clone URL; `since` may be set per-entry or globally.
 
+Mirror refreshes cross the network, and the network fails transiently: in the
+three days to 2026-11-26 seven DIFFERENT repositories each timed out once at
+120 s (intermittent TLS stalls to github.com from the pipeline host), and each single
+timeout made the whole git source report an error.  So a transient failure
+(timeout, connection reset, TLS or 5xx stderr) is retried with backoff, at most
+`MIRROR_ATTEMPTS` times per repository and `MIRROR_RETRY_BUDGET` retries per run
+(a GitHub outage must not cost every repository three timeouts), and when the
+first `MIRROR_CIRCUIT_BREAKER_FAILURES` refreshes all miss with none succeeding
+the rest of the run skips mirror refreshes and reports a source error (a
+GitHub outage must not cost hundreds of repositories one timeout each either).
+Rate limiting (429, GitHub's rate-limit messages) counts as transient; a
+rejected certificate or missing credentials never does.  A repository
+that is still unavailable after its retries is recorded in
+`<mirrors_dir>/.refresh-failures.json` and tolerated as a per-repository miss;
+it becomes a SOURCE error only when it is persistent (the same repository fails
+`PERSISTENT_FAILURE_RUNS` runs in a row), systemic (at least half of this run's
+mirror refreshes failed), or not transient at all (authentication, a missing
+repository), or when the failure record cannot be written.  Entries for
+repositories no longer configured are pruned from the record, but only after a
+run that listed and tried every configured repository.
+
 git is the *quiet* source: one non-merge commit = one event. The filter() valve
 drops merge commits (already excluded at fetch) and anything missing a sha. The
 event id is the FULL 40-char sha (`git:<sha>`) — short prefixes collide at org
@@ -47,6 +68,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 
 # Make `remembrancerlib` / `ingest` importable when run as a script.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,6 +82,61 @@ SEP = "\x1f"
 REC = "\x1e"
 DEFAULT_MIRRORS_DIR = os.path.join("state", "git_mirrors")
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
+# Transient mirror failures: tries per repository, backoff before retry n
+# (BACKOFF * 2**(n-1) seconds), retries per connector run, and how many
+# consecutive runs one repository may miss before it is a source error.
+MIRROR_ATTEMPTS = 3
+MIRROR_RETRY_BACKOFF_SECONDS = 5.0
+MIRROR_RETRY_BUDGET = 4  # worst case: 4 extra timeouts (~9 min at 120 s) per run
+PERSISTENT_FAILURE_RUNS = 3
+REFRESH_FAILURES_FILE = ".refresh-failures.json"
+# After this many transient mirror misses with not one refresh succeeding,
+# GitHub or the network is down: stop refreshing for the rest of the run
+# instead of spending a full timeout on each of hundreds of repositories.
+MIRROR_CIRCUIT_BREAKER_FAILURES = 5
+# stderr that names a network condition rather than a property of the
+# repository (auth, missing repo, corrupt mirror), so a retry can succeed.
+# TLS words count only beside a transport failure: a bare "ssl" would also
+# match "SSL certificate problem", which no retry fixes.  Rate limiting
+# (429, GitHub's primary and secondary limits) passes with time.
+_TRANSIENT_STDERR = re.compile(
+    r"could not resolve host|connection (timed out|reset|refused)|"
+    r"failed to connect|operation timed out|timed out|early eof|rpc failed|"
+    r"remote end hung up|unexpected disconnect|empty reply|"
+    r"gnutls recv error|gnutls_handshake|ssl_read|ssl_write|ssl_connect|"
+    r"ssl_error_syscall|\b(ssl|tls)\b[^\n]*\b(connection|handshake)\b|"
+    r"returned error: (5\d\d|429)|http (5\d\d|429)|internal server error|"
+    r"bad gateway|service unavailable|temporarily unavailable|"
+    r"too many requests|secondary rate limit|api rate limit exceeded",
+    re.IGNORECASE,
+)
+# stderr that is permanent whatever else it says: a certificate the client
+# rejects, or credentials it lacks.  Checked first, so a line that also says
+# "connection" is not retried.
+_PERMANENT_STDERR = re.compile(
+    r"certificate problem|certificate verify failed|"
+    r"certificate verification failed|could not read username|"
+    r"authentication failed|\bnot found\b",
+    re.IGNORECASE,
+)
+
+
+class TransientGitError(RuntimeError):
+    """A network-bound git or gh failure (mirror refresh or clone, org
+    listing) that a later attempt may not repeat."""
+
+
+class RetryBudget:
+    """Retries left for this run, shared by every repository's mirror."""
+
+    def __init__(self, remaining=MIRROR_RETRY_BUDGET):
+        self.remaining = max(0, int(remaining))
+
+    def take(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
 
 
 def _command_timeout(value) -> float:
@@ -123,6 +201,19 @@ class GitConnector(Connector):
             or DEFAULT_MIRRORS_DIR
         )
         self.had_errors = False
+        # Mirror outcomes of this run: names refreshed, and transient misses
+        # (name -> message) that are judged together once fetch() has finished.
+        self.retry_budget = RetryBudget()
+        self._sleep = time.sleep  # tests replace it to skip the backoff wait
+        self._mirror_ok: list[str] = []
+        self._mirror_transient: dict[str, str] = {}
+        # Every mirror name this run tried (any outcome), whether the entry
+        # list was complete (the org listing succeeded), and whether the
+        # circuit breaker skipped the rest: the record is pruned to the names
+        # tried only when the run saw every configured repository.
+        self._mirror_tried: set[str] = set()
+        self._entries_complete = True
+        self._breaker_open = False
         org_cfg = config.get("git_org") or {}
         self.command_timeout_seconds = _command_timeout(
             os.environ.get("REMEMBRANCER_GIT_COMMAND_TIMEOUT_SECONDS")
@@ -142,11 +233,14 @@ class GitConnector(Connector):
         explicit = {r.get("name") for r in self.repos}
         entries = []
         try:
-            org_repos = _org_repos(
-                self.org, timeout=self.command_timeout_seconds,
+            org_repos = _with_retries(
+                lambda: _org_repos(self.org, timeout=self.command_timeout_seconds),
+                budget=self.retry_budget,
+                sleep=self._sleep,
             )
         except RuntimeError as exc:
             self.had_errors = True
+            self._entries_complete = False
             print(f"[git] {exc}", file=sys.stderr)
             return entries
         for r in org_repos:
@@ -197,13 +291,29 @@ class GitConnector(Connector):
                 name = r.get("name") or ""
                 url = r.get("url") or (f"https://github.com/{name}.git" if "/" in name else None)
                 if url:
+                    if self._breaker_open:
+                        continue  # counted once, in _trip_breaker
+                    self._mirror_tried.add(name or url)
                     try:
-                        path = _ensure_mirror(
-                            name,
-                            url,
-                            self.mirrors_dir,
-                            timeout=self.command_timeout_seconds,
+                        path = _with_retries(
+                            lambda: _ensure_mirror(
+                                name,
+                                url,
+                                self.mirrors_dir,
+                                timeout=self.command_timeout_seconds,
+                            ),
+                            budget=self.retry_budget,
+                            sleep=self._sleep,
                         )
+                        self._mirror_ok.append(name or url)
+                    except TransientGitError as exc:
+                        # Judged after the loop: one miss is tolerated, a
+                        # persistent or systemic one is a source error.
+                        self._mirror_transient[name or url] = str(exc)
+                        if (not self._mirror_ok and len(self._mirror_transient)
+                                >= MIRROR_CIRCUIT_BREAKER_FAILURES):
+                            self._trip_breaker()
+                        continue
                     except (OSError, RuntimeError) as exc:
                         self.had_errors = True
                         print(f"[git] mirror unavailable for {name or url}: {exc}",
@@ -233,6 +343,82 @@ class GitConnector(Connector):
             except RuntimeError as exc:
                 self.had_errors = True
                 print(f"[git] {repo_name}: {exc}", file=sys.stderr)
+        self._judge_mirror_failures()
+
+    def _trip_breaker(self):
+        """Stop refreshing mirrors for the rest of the run: the first
+        MIRROR_CIRCUIT_BREAKER_FAILURES refreshes all missed and none worked,
+        so the rest would each cost a full timeout for the same answer."""
+        self._breaker_open = True
+        self.had_errors = True
+        print(f"[git] {len(self._mirror_transient)} mirror refreshes failed "
+              "and none succeeded; skipping the remaining mirror refreshes "
+              "this run [source error: GitHub or the network is down]",
+              file=sys.stderr)
+
+    def _judge_mirror_failures(self):
+        """Decide whether this run's transient mirror misses are a source error.
+
+        One repository missing one run is coverage that the next run restores
+        (ids are full shas and `--since` re-reads the window), so it is logged,
+        not raised.  It is a source error when the same repository has now
+        missed PERSISTENT_FAILURE_RUNS runs in a row, when at least half of the
+        run's mirror refreshes missed (GitHub or the network is down, not one
+        repository), or when the streak record cannot be kept, because then
+        persistence cannot be proven either way.
+        """
+        failed = self._mirror_transient
+        if not failed and not self._mirror_ok:
+            return  # no mirror-backed repository this run: nothing to record
+        path = os.path.join(self.mirrors_dir, REFRESH_FAILURES_FILE)
+        record = _load_failure_record(path)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for name in self._mirror_ok:
+            record.pop(name, None)
+        if self._entries_complete and not self._breaker_open:
+            # A repository removed from the org or excluded since its last
+            # miss would otherwise keep its streak in the file forever.  Not
+            # when the run saw only part of the list: a failed org listing or
+            # a tripped breaker would erase streaks it never re-tested.
+            for name in [k for k in record if k not in self._mirror_tried]:
+                del record[name]
+        for name, message in failed.items():
+            prior = record.get(name) or {}
+            try:
+                runs = int(prior.get("consecutive_runs", 0)) + 1
+            except (TypeError, ValueError):
+                runs = 1
+            record[name] = {
+                "consecutive_runs": runs,
+                "first_failed_at": prior.get("first_failed_at") or now,
+                "last_failed_at": now,
+                "last_error": message[:500],
+            }
+        try:
+            _write_failure_record(path, record)
+        except OSError as exc:
+            if failed:
+                self.had_errors = True
+                print(f"[git] cannot record mirror failures in {path}: {exc}",
+                      file=sys.stderr)
+        attempted = len(failed) + len(self._mirror_ok)
+        # With one mirror-backed repository, one miss is 1 of 1 and therefore
+        # systemic: a single-repository config has no healthy peers to show
+        # the network is up, so it keeps the old behaviour (a source error).
+        systemic = bool(failed) and 2 * len(failed) >= attempted
+        for name in sorted(failed):
+            runs = record[name]["consecutive_runs"]
+            persistent = runs >= PERSISTENT_FAILURE_RUNS
+            if persistent or systemic:
+                self.had_errors = True
+                why = (f"{runs} consecutive runs" if persistent else
+                       f"{len(failed)} of {attempted} mirrors failed this run")
+                print(f"[git] mirror unavailable for {name}: {failed[name]} "
+                      f"[source error: {why}]", file=sys.stderr)
+            else:
+                print(f"[git] mirror unavailable for {name}: {failed[name]} "
+                      f"[tolerated: run {runs} of {PERSISTENT_FAILURE_RUNS} "
+                      f"before it is a source error]", file=sys.stderr)
 
     # --- stage 2: filter (anti-blowup valve) -------------------------------
     def filter(self, raw):
@@ -264,6 +450,45 @@ class GitConnector(Connector):
         )
 
 
+def _load_failure_record(path):
+    """The per-repository miss streaks; an absent or unreadable file is empty
+    (a lost record only delays escalation by a run or two, it never hides a
+    systemic outage, which is judged within the run)."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _write_failure_record(path, record):
+    """Atomic write next to the mirrors (the cache the runner lock protects)."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    # A crash between open and replace leaves `<file>.tmp.<pid>`; sweep those
+    # (the runner lock means no other writer is mid-write).
+    prefix = os.path.basename(path) + ".tmp."
+    for leftover in os.listdir(directory):
+        if leftover.startswith(prefix):
+            try:
+                os.unlink(os.path.join(directory, leftover))
+            except OSError:
+                pass
+    try:
+        with open(tmp, "w") as f:
+            json.dump(record, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 def _org_repos(org, *, timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS):
     """All repos in a GitHub org via `gh api` (name/fork/archived per line).
     A failed listing is source-health failure, not an empty organization.  The
@@ -279,12 +504,13 @@ def _org_repos(org, *, timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS):
             args, capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
+        raise TransientGitError(
             f"org listing timed out after {timeout:g}s for {org}"
         ) from exc
     if res.returncode != 0:
-        raise RuntimeError(
-            f"org listing failed for {org}: {res.stderr.strip()[:200]}"
+        raise _mirror_failure(
+            f"org listing failed for {org}: {res.stderr.strip()[:200]}",
+            res.stderr,
         )
     out = []
     for line in res.stdout.splitlines():
@@ -334,10 +560,54 @@ def _is_git_repo(path):
 _GIT_CREDENTIAL_ARGS = ("-c", "credential.helper=!gh auth git-credential")
 
 
+def _mirror_failure(message, stderr=""):
+    """The error for a failed mirror command: transient when stderr names a
+    network condition, so the caller may retry it."""
+    stderr = stderr or ""
+    transient = (_TRANSIENT_STDERR.search(stderr)
+                 and not _PERMANENT_STDERR.search(stderr))
+    return (TransientGitError if transient else RuntimeError)(message)
+
+
+def _with_retries(call, *, attempts=MIRROR_ATTEMPTS, budget=None, sleep=None):
+    """Run `call()`, retrying a TransientGitError with doubling backoff.
+
+    At most `attempts` tries in all, and only while `budget` (a RetryBudget
+    shared across the run; None means unlimited) has retries left.  The last
+    error is re-raised saying which limit stopped it: the attempt cap or the
+    run's retry budget.  Any other
+    exception propagates at once: retrying a bad credential or a missing
+    repository only spends another timeout.
+    """
+    sleep = time.sleep if sleep is None else sleep
+    attempts = max(1, int(attempts))
+    attempt = 1
+    while True:
+        try:
+            return call()
+        except TransientGitError as exc:
+            if attempt >= attempts:
+                raise TransientGitError(
+                    f"{exc} (attempt {attempt} of {attempts})"
+                ) from exc
+            if budget is not None and not budget.take():
+                raise TransientGitError(
+                    f"{exc} (attempt {attempt}; run retry budget exhausted)"
+                ) from exc
+            delay = MIRROR_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            print(f"[git] {exc}; retrying in {delay:g}s "
+                  f"(attempt {attempt + 1} of {attempts})", file=sys.stderr)
+            sleep(delay)
+            attempt += 1
+
+
 def _ensure_mirror(
     name, url, mirrors_dir, *, timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
 ):
-    """Clone-or-refresh a bare mirror, raising when freshness is unprovable."""
+    """Clone-or-refresh a bare mirror, raising when freshness is unprovable.
+
+    One try.  A network-bound failure raises TransientGitError, which the
+    connector retries through `_with_retries` under its run budget."""
     timeout = _command_timeout(timeout)
     os.makedirs(mirrors_dir, exist_ok=True)
     base = (name or url).replace("/", "__")
@@ -361,12 +631,13 @@ def _ensure_mirror(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
+            raise TransientGitError(
                 f"mirror refresh timed out after {timeout:g}s for {name or url}"
             ) from exc
         if res.returncode != 0:
-            raise RuntimeError(
-                f"mirror refresh failed for {name}: {res.stderr.strip()}"
+            raise _mirror_failure(
+                f"mirror refresh failed for {name}: {res.stderr.strip()}",
+                res.stderr,
             )
         return dest
     # Prefer a blobless mirror (log/--name-only never need blobs); some
@@ -384,7 +655,7 @@ def _ensure_mirror(
                     shutil.rmtree(dest)
                 else:
                     os.unlink(dest)
-            raise RuntimeError(
+            raise TransientGitError(
                 f"mirror clone timed out after {timeout:g}s for {name or url}"
             ) from exc
         if res.returncode == 0:
@@ -396,8 +667,9 @@ def _ensure_mirror(
                 shutil.rmtree(dest)
             else:
                 os.unlink(dest)
-    raise RuntimeError(
-        f"mirror clone failed for {name or url}: {res.stderr.strip()}"
+    raise _mirror_failure(
+        f"mirror clone failed for {name or url}: {res.stderr.strip()}",
+        res.stderr,
     )
 
 
