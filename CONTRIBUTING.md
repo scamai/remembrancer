@@ -44,6 +44,18 @@ Signed-off-by: Your Name <you@example.com>
 
 Every commit in a pull request needs one, and a CI check refuses a pull request with an unsigned commit. To sign off commits you already made, run `git rebase --signoff main`.
 
+## Refresh the README demo image
+
+The light and dark SVGs in `docs/media/` use the fictional Git history and CLI
+results from `v0.1.0-alpha`. From a Git checkout with that tag, run the generator with Git, Bash and Python 3.12 or newer.
+
+```sh
+python3 examples/render-demo-image.py --revision v0.1.0-alpha
+```
+
+The script runs the demo in a temporary checkout and verifies the answer,
+its source commit and the guest result before rendering.
+
 ## Licence
 
 By contributing, you agree that your contributions are licensed under the Apache License 2.0, as in [LICENSE](LICENSE).

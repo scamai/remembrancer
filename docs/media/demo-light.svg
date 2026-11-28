@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 508" role="img"
+  aria-labelledby="title description">
+  <title id="title">Remembrancer fictional Git demo</title>
+  <desc id="description">Who is on call for ledger-service? Sam Rivera becomes on-call owner for ledger-service. Source OWNERS.md, commit 747d6c3. Guest (no matches).</desc>
+  <path fill="#ffffff" d="M0 0h760v508H0z"/>
+  <path fill="#f3f3f6" d="M32 212h696v216H32z"/>
+  <path fill="#2b50d8" d="M32 212h4v216h-4z"/>
+  <g font-family="system-ui, sans-serif" font-weight="700" fill="#0a0a0a">
+    <text x="32" y="126" font-size="48"><tspan x="32">Who is on call for</tspan><tspan x="32" dy="52">ledger-service?</tspan></text>
+    <text x="60" y="312" font-size="40"><tspan x="60">Sam Rivera becomes on-call</tspan><tspan x="60" dy="44">owner for ledger-service</tspan></text>
+  </g>
+  <g font-family="ui-monospace, monospace" font-size="25" fill="#55555e">
+    <text x="32" y="53">Fictional Git demo</text>
+    <text x="60" y="259" fill="#2b50d8">dana · eng</text>
+    <text x="60" y="398">Git · OWNERS.md · 747d6c3</text>
+    <text x="60" y="476">guest</text>
+    <text x="704" y="476" text-anchor="end">(no matches)</text>
+  </g>
+</svg>

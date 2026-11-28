@@ -5,11 +5,19 @@ Give your team's AI agents a searchable record of what changed and why. Remembra
 > [!NOTE]
 > [**v0.1.0-alpha**](https://github.com/scamai/remembrancer/releases/tag/v0.1.0-alpha) ingests Git and stores memory as local files. The quick start and Docker path are tested on Linux with Python 3.12. [See alpha limits](#limits-of-v01).
 
-[Try the demo](#quick-start) · [Use Docker](#docker-demo) · [Index your Git repositories](#your-own-repositories) · [Connect an agent](#connect-an-agent) · [Get help](#get-help)
+[Try the demo](#run-the-demo-with-python) · [Use Docker](#docker-demo) · [Index your Git repositories](#your-own-repositories) · [Connect an agent](#connect-an-agent) · [Get help](#get-help)
 
 ## Quick start
 
-The demo creates ten fictional commits for Acme. Ask who is on call for `ledger-service` and the CLI returns the answer with its source commit. This excerpt is from a real demo run.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/demo-dark.svg">
+  <img src="docs/media/demo-light.svg" alt="Fictional Git demo. Dana sees Sam Rivera as the on-call owner for ledger-service, with a citation to OWNERS.md in commit 747d6c3. The guest query returns no matches.">
+</picture>
+
+Rendered from the `v0.1.0-alpha` CLI using ten fictional Git commits. [Reproduce the image](CONTRIBUTING.md#refresh-the-readme-demo-image).
+
+<details>
+<summary>CLI output and full citation</summary>
 
 <!-- first-run:output -->
 ```text
@@ -18,6 +26,8 @@ acl:['eng']
 provenance:['git:747d6c350a51c9942b3d807f9af8ae5c8681461d']
 [context/eng/docs-sam-rivera-becomes.md]
 ```
+
+</details>
 
 ### Run the demo with Python
 
